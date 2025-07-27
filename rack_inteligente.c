@@ -12,6 +12,7 @@
 #include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "hardware/adc.h"
 #include "pico/cyw43_arch.h"
 #include "lwip/apps/mqtt.h"
 #include "lwip/ip_addr.h"
@@ -26,20 +27,36 @@
 // Configurações do Botão
 #define RACK_PORT_STATE 5
 
+/* Choose 'C' for Celsius or 'F' for Fahrenheit. */
+#define TEMPERATURE_UNITS 'C'
+
 // Variáveis Globais
 static mqtt_client_t *mqtt_client;
 static ip_addr_t broker_ip;
 static bool mqtt_connected = false;
-static bool button_last_state = false;
+static bool last_rack_door_state = false;
+static float last_rack_temperature = -1.0f;
 
 // Protótipos de Funções
 static void mqtt_connection_callback(mqtt_client_t *client, void *arg, mqtt_connection_status_t status);
-void publish_button_state(bool pressed);
+
+float read_rack_temperature(const char unit);
+
+void publish_door_state(bool pressed);
+void publish_rack_temperature(float temperature);
+
 void dns_check_callback(const char *name, const ip_addr_t *ipaddr, void *callback_arg);
 
 // Função Principal
 int main() {
     stdio_init_all();
+    /* Initialize hardware AD converter, enable onboard temperature sensor and
+     *   select its channel (do this once for efficiency, but beware that this
+     *   is a global operation). */
+     adc_init();
+     adc_set_temp_sensor_enabled(true);
+     adc_select_input(4);
+ 
     sleep_ms(2000);
     printf("\n=== Iniciando MQTT Button Monitor ===\n");
 
@@ -86,18 +103,46 @@ int main() {
         bool rack_port_state = !gpio_get(RACK_PORT_STATE); // <<< Inverte porque é pull-up
 
         // Se mudou de estado, publica
-        if (rack_port_state != button_last_state) {
+        if (rack_port_state != last_rack_door_state) {
             printf("[BOTÃO] Estado mudou para: %s\n", rack_port_state ? "ON" : "OFF");
-            publish_button_state(rack_port_state);
-            button_last_state = rack_port_state;
+            publish_door_state(rack_port_state);
+            last_rack_door_state = rack_port_state;
         }
 
-        sleep_ms(200); // Ajuste conforme desejado
+        // Lê a temperatura do rack
+        float rack_temperature = read_rack_temperature(TEMPERATURE_UNITS);
+        if (rack_temperature != last_rack_temperature) {
+            printf("[TEMPERATURA] Temperatura mudou para: %.2f\n", rack_temperature);
+            publish_rack_temperature(rack_temperature);
+            last_rack_temperature = rack_temperature;
+        }
+
+        sleep_ms(1000); // Ajuste conforme desejado
     }
 
     // Finaliza (nunca chega aqui)
     cyw43_arch_deinit();
     return 0;
+}
+
+/* References for this implementation:
+ * raspberry-pi-pico-c-sdk.pdf, Section '4.1.1. hardware_adc'
+ * pico-examples/adc/adc_console/adc_console.c */
+float read_rack_temperature(const char unit) {
+    
+    /* 12-bit conversion, assume max value == ADC_VREF == 3.3 V */
+    const float conversionFactor = 3.3f / (1 << 12);
+
+    float adc = (float)adc_read() * conversionFactor;
+    float tempC = 27.0f - (adc - 0.706f) / 0.001721f;
+
+    if (unit == 'C') {
+        return tempC;
+    } else if (unit == 'F') {
+        return tempC * 9 / 5 + 32;
+    }
+
+    return -1.0f;
 }
 
 // Callback de conexão MQTT
@@ -111,18 +156,40 @@ static void mqtt_connection_callback(mqtt_client_t *client, void *arg, mqtt_conn
     }
 }
 
-// Publicar estado do botão
-void publish_button_state(bool pressed) {
+void publish_rack_temperature(float temperature) {
     if (!mqtt_connected) {
-        printf("[MQTT] Não conectado, não publicando\n");
+        printf("[MQTT] Não conectado, não publicando temperatura do rack\n");
         return;
     }
+    const char *topic_rack_temperature = MQTT_TOPIC "/temperature";
+
+    char message[16];
+    snprintf(message, sizeof(message), "%.2f", temperature);
+
+    printf("[MQTT] Publicando: tópico='%s', mensagem='%s'\n", topic_rack_temperature, message);
+
+    err_t err = mqtt_publish(mqtt_client, topic_rack_temperature, message, strlen(message), 0, 0, NULL, NULL);
+
+    if (err == ERR_OK) {
+        printf("[MQTT] Publicação enviada com sucesso\n");
+    } else {
+        printf("[MQTT] Erro ao publicar: %d\n", err);
+    }
+}
+
+void publish_door_state(bool pressed) {
+    if (!mqtt_connected) {
+        printf("[MQTT] Não conectado, não publicando estado da porta\n");
+        return;
+    }
+    const char *topic_door_state = MQTT_TOPIC"/door";
 
     const char *message = pressed ? "ON" : "OFF";
 
-    printf("[MQTT] Publicando: tópico='%s', mensagem='%s'\n", MQTT_TOPIC, message);
+    printf("[MQTT] Publicando: tópico='%s', mensagem='%s'\n", topic_door_state, message);
 
-    err_t err = mqtt_publish(mqtt_client, MQTT_TOPIC, message, strlen(message), 0, 0, NULL, NULL);
+    err_t err = mqtt_publish(mqtt_client, topic_door_state, message, strlen(message), 0, 0, NULL, NULL);
+
     if (err == ERR_OK) {
         printf("[MQTT] Publicação enviada com sucesso\n");
     } else {
