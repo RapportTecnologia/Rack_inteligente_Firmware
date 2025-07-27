@@ -8,6 +8,7 @@
 / Data de Criação: 22/06/2025
 /----------------------------------------------------------------------------------------------------------------------------------------
 */
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
@@ -21,9 +22,6 @@
 
 #define MQTT_BROKER_PORT 1883
 
-//#define MQTT_TOPIC "pico/button"
-#define MQTT_TOPIC  MQTT_BASE_TOPIC"/"MQTT_RACK_NUMBER
-
 // Configurações do Botão
 #define RACK_PORT_STATE 5
 
@@ -33,9 +31,12 @@
 // Variáveis Globais
 static mqtt_client_t *mqtt_client;
 static ip_addr_t broker_ip;
+static char mqtt_rack_topic[50];  
 static bool mqtt_connected = false;
 static bool last_rack_door_state = false;
 static float last_rack_temperature = -1.0f;
+static float latitude = -3.924263;
+static float longitude = -38.453483;
 
 // Protótipos de Funções
 static void mqtt_connection_callback(mqtt_client_t *client, void *arg, mqtt_connection_status_t status);
@@ -44,6 +45,7 @@ float read_rack_temperature(const char unit);
 
 void publish_door_state(bool pressed);
 void publish_rack_temperature(float temperature);
+void publish_rack_gps_position();
 
 void dns_check_callback(const char *name, const ip_addr_t *ipaddr, void *callback_arg);
 
@@ -79,6 +81,10 @@ int main() {
     gpio_init(RACK_PORT_STATE);
     gpio_set_dir(RACK_PORT_STATE, GPIO_IN);
     gpio_pull_up(RACK_PORT_STATE); // <<< ATENÇÃO: pull-up ativado
+
+    char mqtt_rack_number_str[6];
+    snprintf(mqtt_rack_number_str, sizeof(mqtt_rack_number_str), "%05d", atoi(MQTT_RACK_NUMBER));
+    snprintf(mqtt_rack_topic, sizeof(mqtt_rack_topic), "%s/%s", MQTT_BASE_TOPIC, mqtt_rack_number_str);
 
     // Inicializa cliente MQTT
     mqtt_client = mqtt_client_new();
@@ -116,6 +122,8 @@ int main() {
             publish_rack_temperature(rack_temperature);
             last_rack_temperature = rack_temperature;
         }
+
+        publish_rack_gps_position();
 
         sleep_ms(1000); // Ajuste conforme desejado
     }
@@ -156,12 +164,48 @@ static void mqtt_connection_callback(mqtt_client_t *client, void *arg, mqtt_conn
     }
 }
 
+void publish_rack_gps_position(){
+    if (!mqtt_connected) {
+        printf("[MQTT] Não conectado, não publicando posição do rack\n");
+        return;
+    }
+    char topic_rack_gps_position[50];
+    snprintf(topic_rack_gps_position, sizeof(topic_rack_gps_position), "%s/gps_position", mqtt_rack_topic);
+
+    char message_latitude[16];
+    char message_longitude[16];
+    snprintf(message_latitude, sizeof(message_latitude), "%.6f", latitude);
+    snprintf(message_longitude, sizeof(message_longitude), "%.6f", longitude);
+
+    printf("[MQTT] Publicando: tópico='%s', mensagem_latitude='%s', mensagem_longitude='%s'\n", topic_rack_gps_position, message_latitude, message_longitude);
+
+    char topic_rack_gps_position_latitude[50];
+    snprintf(topic_rack_gps_position_latitude, sizeof(topic_rack_gps_position_latitude), "%s/latitude", topic_rack_gps_position);
+    err_t err = mqtt_publish(mqtt_client, topic_rack_gps_position_latitude, message_latitude, strlen(message_latitude), 0, 0, NULL, NULL);
+
+    if (err == ERR_OK) {
+        printf("[MQTT] Publicação latitude enviada com sucesso\n");
+    } else {
+        printf("[MQTT] Erro ao publicar latitude: %d\n", err);
+    }
+    
+    char topic_rack_gps_position_longitude[50];
+    snprintf(topic_rack_gps_position_longitude, sizeof(topic_rack_gps_position_longitude), "%s/longitude", topic_rack_gps_position);
+    err = mqtt_publish(mqtt_client, topic_rack_gps_position_longitude, message_longitude, strlen(message_longitude), 0, 0, NULL, NULL);
+    if (err == ERR_OK) {
+        printf("[MQTT] Publicação longitude enviada com sucesso\n");
+    } else {
+        printf("[MQTT] Erro ao publicar longitude: %d\n", err);
+    }
+}
+
 void publish_rack_temperature(float temperature) {
     if (!mqtt_connected) {
         printf("[MQTT] Não conectado, não publicando temperatura do rack\n");
         return;
     }
-    const char *topic_rack_temperature = MQTT_TOPIC "/temperature";
+    char topic_rack_temperature[50];
+    snprintf(topic_rack_temperature, sizeof(topic_rack_temperature), "%s/temperature", mqtt_rack_topic);
 
     char message[16];
     snprintf(message, sizeof(message), "%.2f", temperature);
@@ -182,7 +226,8 @@ void publish_door_state(bool pressed) {
         printf("[MQTT] Não conectado, não publicando estado da porta\n");
         return;
     }
-    const char *topic_door_state = MQTT_TOPIC"/door";
+    char topic_door_state[50];
+    snprintf(topic_door_state, sizeof(topic_door_state), "%s/door", mqtt_rack_topic);
 
     const char *message = pressed ? "ON" : "OFF";
 
